@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Nota Certa — Protótipo</title>
+  <meta name="description" content="Protótipo Nota Certa — armazene e organize notas fiscais locais" />
+  <!-- Tailwind Play CDN (for quick prototyping) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React + ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel for in-browser JSX transpilation (only for local/testing) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    /* small safe reset for file:// opening */
+    html,body,#root { height: 100%; }
+    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div id="root"></div>
+
+  <!-- App code (JSX) -->
+  <script type="text/babel">
+  const { useState, useEffect, useRef } = React;
+
+  const STORAGE_KEY = "notaCerta:invoices_static";
+
+  function uid() {
+    return Math.random().toString(36).slice(2, 9);
+  }
+
+  function formatDateInput(d) {
+    if (!d) return "";
+    const dt = new Date(d);
+    return dt.toISOString().slice(0, 10);
+  }
+
+  function daysBetween(a, b) {
+    const ms = new Date(b).setHours(0,0,0,0) - new Date(a).setHours(0,0,0,0);
+    return Math.round(ms / (1000 * 60 * 60 * 24));
+  }
+
+  function Card({ title, value, small }) {
+    return (
+      <div className="bg-slate-50 border rounded p-3 text-center">
+        <div className="text-xs text-slate-500">{title}</div>
+        <div className={"font-semibold " + (small ? "text-base" : "text-xl")}>{value}</div>
+      </div>
+    );
+  }
+
+  function dataUrlToBlob(dataUrl) {
+    const arr = dataUrl.split(',');
+    const mime = arr[0].match(/:(.*?);/)[1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) u8arr[n] = bstr.charCodeAt(n);
+    return new Blob([u8arr], { type: mime });
+  }
+
+  function NotaCertaApp() {
+    const [invoices, setInvoices] = useState([]);
+    const [query, setQuery] = useState("");
+    const [category, setCategory] = useState("all");
+    const [selectedIds, setSelectedIds] = useState(new Set());
+    const [showUpload, setShowUpload] = useState(false);
+    const [alertDays, setAlertDays] = useState(30);
+    const fileRef = useRef();
+
+    useEffect(() => {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        try {
+          setInvoices(JSON.parse(raw));
+        } catch(e) {
+          console.error("Erro lendo localStorage:", e);
+        }
+      }
+    }, []);
+
+    useEffect(() => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(invoices));
+      } catch(e) {
+        console.error("Erro salvando localStorage:", e);
+      }
+    }, [invoices]);
+
+    const categories = Array.from(new Set(invoices.map(i => i.category).filter(Boolean)));
+
+    function handleFiles(files, meta = {}) {
+      const promises = Array.from(files).map(file =>
+        new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            res({
+              id: uid(),
+              name: file.name,
+              size: file.size,
+              type: file.type,
+              dataUrl: reader.result,
+              createdAt: new Date().toISOString(),
+              category: meta.category || "Sem categoria",
+              product: meta.product || "",
+              warrantyDate: meta.warrantyDate || null,
+              notes: meta.notes || "",
+            });
+          };
+          reader.onerror = rej;
+          reader.readAsDataURL(file);
+        })
+      );
+
+      Promise.all(promises).then(items => setInvoices(prev => [...items, ...prev]));
+    }
+
+    function handleUploadSubmit(e) {
+      e.preventDefault();
+      const files = fileRef.current.files;
+      const form = new FormData(e.target);
+      const meta = {
+        category: form.get("category") || "Sem categoria",
+        product: form.get("product") || "",
+        warrantyDate: form.get("warrantyDate") || null,
+        notes: form.get("notes") || "",
+      };
+      if (!files.length) return alert("Selecione um arquivo.");
+      handleFiles(files, meta);
+      e.target.reset();
+      setShowUpload(false);
+    }
+
+    function toggleSelect(id) {
+      setSelectedIds(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+      });
+    }
+
+    function removeSelected() {
+      if (!confirm("Remover as notas fiscais selecionadas?")) return;
+      setInvoices(prev => prev.filter(i => !selectedIds.has(i.id)));
+      setSelectedIds(new Set());
+    }
+
+    function exportAsJSON() {
+      const items = invoices.filter(i => selectedIds.size ? selectedIds.has(i.id) : true);
+      const blob = new Blob([JSON.stringify(items, null, 2)], { type: "application/json" });
+      downloadBlob(blob, "nota-certa-export.json");
+    }
+
+    function exportAsCSV() {
+      const items = invoices.filter(i => selectedIds.size ? selectedIds.has(i.id) : true);
+      const rows = [
+        ["id","name","category","product","warrantyDate","createdAt","notes","size","type"],
+        ...items.map(i => [i.id, i.name, i.category, i.product, i.warrantyDate || "", i.createdAt, (i.notes||"").replace(/\n/g, " "), i.size, i.type])
+      ];
+      const csv = rows.map(r => r.map(cell => '"' + String(cell).replace(/"/g,'""') + '"').join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      downloadBlob(blob, "nota-certa-export.csv");
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+
+    function clearAll() {
+      if (!confirm("Limpar todos os dados salvos localmente?")) return;
+      localStorage.removeItem(STORAGE_KEY);
+      setInvoices([]);
+      setSelectedIds(new Set());
+    }
+
+    const filtered = invoices.filter(i => {
+      const q = query.trim().toLowerCase();
+      if (category !== "all" && i.category !== category) return false;
+      if (!q) return true;
+      return (i.name || "").toLowerCase().includes(q) || (i.product || "").toLowerCase().includes(q) || (i.notes || "").toLowerCase().includes(q);
+    });
+
+    const now = new Date();
+    const alerts = invoices.map(i => {
+      if (!i.warrantyDate) return null;
+      const days = daysBetween(now, new Date(i.warrantyDate));
+      return { id: i.id, name: i.name, days };
+    }).filter(Boolean).filter(a => a.days <= alertDays);
+
+    return (
+      <div className="min-h-screen">
+        <header className="bg-white shadow sticky top-0 z-20">
+          <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-indigo-600 to-sky-500 text-white rounded-lg flex items-center justify-center font-bold">NC</div>
+              <div>
+                <h1 className="font-semibold text-lg">Nota Certa</h1>
+                <p className="text-xs text-slate-500">Armazene e organize suas notas fiscais com segurança</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="hidden sm:flex items-center gap-2 bg-slate-100 px-3 py-2 rounded-md">
+                <svg className="w-4 h-4 opacity-70" viewBox="0 0 24 24" fill="none"><path d="M21 21l-4.35-4.35" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Pesquisar notas, produto ou notas..." className="bg-transparent outline-none text-sm" />
+              </div>
+
+              <button onClick={()=>setShowUpload(true)} className="px-3 py-2 bg-indigo-600 text-white rounded-md shadow-sm hover:bg-indigo-700">+ Upload</button>
+            </div>
+          </div>
+        </header>
+
+        <div className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
+          <aside className="lg:col-span-1">
+            <div className="bg-white p-4 rounded-lg shadow-sm">
+              <h2 className="font-medium">Resumo</h2>
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <Card title="Total" value={invoices.length} />
+                <Card title="Com garantia" value={invoices.filter(i => i.warrantyDate).length} />
+                <Card title="Categorias" value={categories.length} />
+                <Card title="Alerta (dias)" value={alertDays} small />
+              </div>
+
+              <div className="mt-4">
+                <label className="text-sm text-slate-600">Filtro por categoria</label>
+                <select className="mt-2 w-full rounded-md border px-3 py-2" value={category} onChange={e=>setCategory(e.target.value)}>
+                  <option value="all">Todas</option>
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+
+              <div className="mt-4">
+                <label className="text-sm text-slate-600">Avisos em (dias)</label>
+                <input type="number" className="mt-2 w-full rounded-md border px-3 py-2" value={alertDays} onChange={e=>setAlertDays(Number(e.target.value)||0)} />
+              </div>
+
+              <div className="mt-4 flex gap-2">
+                <button onClick={exportAsCSV} className="flex-1 px-3 py-2 bg-slate-800 text-white rounded-md">Exportar CSV</button>
+                <button onClick={exportAsJSON} className="flex-1 px-3 py-2 border rounded-md">Exportar JSON</button>
+              </div>
+
+              <div className="mt-4 flex gap-2">
+                <button onClick={removeSelected} className="flex-1 px-3 py-2 bg-red-600 text-white rounded-md" disabled={!selectedIds.size}>Remover</button>
+                <button onClick={clearAll} className="flex-1 px-3 py-2 border rounded-md">Limpar</button>
+              </div>
+            </div>
+
+            <div className="mt-4 bg-white p-4 rounded-lg shadow-sm">
+              <h3 className="font-medium">Alertas</h3>
+              <p className="text-sm text-slate-500 mt-1">Notas com garantia expirando nos próximos <strong>{alertDays}</strong> dias</p>
+              <ul className="mt-3 space-y-2">
+                {alerts.length ? alerts.map(a => (
+                  <li key={a.id} className="flex items-center justify-between p-2 rounded-md bg-yellow-50">
+                    <div className="text-sm">{a.name}</div>
+                    <div className="text-xs text-slate-600">{a.days} dias</div>
+                  </li>
+                )) : <li className="text-sm text-slate-500">Nenhum alerta</li>}
+              </ul>
+            </div>
+          </aside>
+
+          <main className="lg:col-span-3">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Dashboard</h2>
+              <div className="text-sm text-slate-500">Últimas {Math.min(5, invoices.length)}</div>
+            </div>
+
+            <div className="bg-white rounded-lg shadow-sm p-3">
+              <div className="overflow-x-auto">
+                <table className="w-full table-auto">
+                  <thead>
+                    <tr className="text-left text-slate-600 text-sm">
+                      <th className="px-3 py-2">Sel</th>
+                      <th className="px-3 py-2">Nome</th>
+                      <th className="px-3 py-2">Produto / Categoria</th>
+                      <th className="px-3 py-2">Garantia</th>
+                      <th className="px-3 py-2">Tamanho</th>
+                      <th className="px-3 py-2">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map(i => {
+                      const warranty = i.warrantyDate ? formatDateInput(i.warrantyDate) : "—";
+                      const days = i.warrantyDate ? daysBetween(new Date(), new Date(i.warrantyDate)) : null;
+                      const warn = days !== null && days <= alertDays;
+                      return (
+                        <tr key={i.id} className="border-t">
+                          <td className="px-3 py-2">
+                            <input type="checkbox" checked={selectedIds.has(i.id)} onChange={()=>toggleSelect(i.id)} />
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="font-medium">{i.name}</div>
+                            <div className="text-xs text-slate-500">Adicionado {new Date(i.createdAt).toLocaleDateString()}</div>
+                          </td>
+                          <td className="px-3 py-2 text-sm">
+                            <div>{i.product || "—"}</div>
+                            <div className="text-xs text-slate-500">{i.category || "Sem categoria"}</div>
+                          </td>
+                          <td className="px-3 py-2 text-sm">
+                            <div>{warranty}</div>
+                            {warn && <div className="text-xs text-amber-700">{days} dias</div>}
+                          </td>
+                          <td className="px-3 py-2 text-sm">{(i.size/1024).toFixed(1)} KB</td>
+                          <td className="px-3 py-2 text-sm">
+                            <div className="flex gap-2">
+                              <button onClick={()=>window.open(i.dataUrl)} className="px-2 py-1 border rounded">Abrir</button>
+                              <button onClick={()=>{
+                                const blob = dataUrlToBlob(i.dataUrl);
+                                downloadBlob(blob, i.name);
+                              }} className="px-2 py-1 border rounded">Baixar</button>
+                              <button onClick={()=>{
+                                setInvoices(prev=> prev.map(it=> it.id===i.id ? {...it, notes: prompt('Notas', it.notes)||it.notes} : it));
+                              }} className="px-2 py-1 border rounded">Editar</button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+
+                    {!filtered.length && (
+                      <tr><td colSpan={6} className="p-6 text-center text-slate-500">Sem resultados</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </main>
+        </div>
+
+        {showUpload && (
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-lg w-full max-w-2xl p-6">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-medium">Upload de nota fiscal</h3>
+                <button onClick={()=>setShowUpload(false)} className="text-slate-500">Fechar</button>
+              </div>
+
+              <form onSubmit={handleUploadSubmit} className="mt-4 space-y-3">
+                <div>
+                  <label className="text-sm">Arquivos</label>
+                  <input ref={fileRef} name="files" type="file" multiple className="mt-2 w-full" />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-sm">Categoria</label>
+                    <input name="category" className="mt-2 w-full rounded-md border px-3 py-2" placeholder="Ex: Eletrodoméstico" />
+                  </div>
+                  <div>
+                    <label className="text-sm">Produto</label>
+                    <input name="product" className="mt-2 w-full rounded-md border px-3 py-2" placeholder="Modelo / descrição" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-sm">Data de garantia (opcional)</label>
+                    <input name="warrantyDate" type="date" className="mt-2 w-full rounded-md border px-3 py-2" />
+                  </div>
+                  <div>
+                    <label className="text-sm">Notas</label>
+                    <input name="notes" className="mt-2 w-full rounded-md border px-3 py-2" placeholder="Observações" />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={()=>setShowUpload(false)} className="px-3 py-2 border rounded">Cancelar</button>
+                  <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">Salvar</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        <footer className="max-w-7xl mx-auto px-4 py-6 text-sm text-slate-500">
+          Desenvolvido — Nota Certa (protótipo)
+        </footer>
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<NotaCertaApp />);
+  </script>
+</body>
+</html>
